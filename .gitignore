@@ -1,0 +1,7 @@
+.*
+!/.gitignore
+!/.gitattributes
+/results/*
+/hcp1200/*
+/logs/* 
+

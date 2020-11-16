@@ -1,0 +1,42 @@
+participants_tsv: cfg/participants_testing.tsv
+
+hcp1200_zip_dir: /project/ctb-akhanf/ext-data/hcp1200/zipfiles
+
+hcp_packages:
+ - 7T_REST_1.6mm_preproc
+ - 7T_REST_preproc_extended
+ - 3T_Structural_1.6mm_preproc
+
+hcp_package_dict:
+ '{subject}/MNINonLinear/Results/rfMRI_REST1_7T_PA/rfMRI_REST1_7T_PA_Atlas_1.6mm.dtseries.nii': 7T_REST_1.6mm_preproc
+ '{subject}/MNINonLinear/Results/rfMRI_REST2_7T_AP/rfMRI_REST2_7T_AP_Atlas_1.6mm.dtseries.nii': 7T_REST_1.6mm_preproc
+ '{subject}/MNINonLinear/Results/rfMRI_REST1_7T_PA/rfMRI_REST1_7T_PA.nii.gz': 7T_REST_preproc_extended
+ '{subject}/MNINonLinear/Results/rfMRI_REST2_7T_AP/rfMRI_REST2_7T_AP.nii.gz': 7T_REST_preproc_extended
+ '{subject}/MNINonLinear/Results/rfMRI_REST1_7T_PA/Movement_Regressors_dt.txt': 7T_REST_1.6mm_preproc
+ '{subject}/MNINonLinear/Results/rfMRI_REST2_7T_AP/Movement_Regressors_dt.txt': 7T_REST_1.6mm_preproc 
+ '{subject}/MNINonLinear/ROIs/Atlas_wmparc.1.60.nii.gz': 3T_Structural_1.6mm_preproc
+ '{subject}/MNINonLinear/T1w_restore.1.60.nii.gz': 3T_Structural_1.6mm_preproc
+ '{subject}/MNINonLinear/xfms/acpc_dc2standard.nii.gz': 3T_Structural_preproc
+ '{subject}/MNINonLinear/T1w.nii.gz': 3T_Structural_preproc
+ '{subject}/T1w/T1w_acpc_dc.nii.gz': 3T_Structural_preproc
+
+diffparc: /project/6050199/nchris5/diffparc-smk/results/diffparc/sub-{subject}
+
+runs:
+  - rfMRI_REST1_7T_PA
+  - rfMRI_REST2_7T_AP
+voxel_size: 1p6mm
+vertex_nr: 59k
+sigma: 1.6
+
+seed: PFCtx
+subcort_atlas: resources/sub-MNI2009b_desc-allFSstyle_workbench.nii.gz
+subcort_labels: resources/sub-MNI2009b_desc-allFSstyle_labels.txt
+lh_mmp: resources/lh.hcp-mmp.59k_fs_LR.label.gii
+rh_mmp: resources/rh.hcp-mmp.59k_fs_LR.label.gii
+
+singularity_neuroglia: /project/6007967/akhanf/singularity/bids-apps/khanlab_neuroglia-core_latest.sif 
+singularity_connectomewb: /project/6007967/software/transparentsingularity/connectome-workbench_1.4.1_20191117.simg/connectome-workbench_1.4.1_20191117.simg
+singularity_ciftify: /project/6007967/akhanf/singularity/bids-apps/tigrlab_fmriprep_ciftify_v1.3.2-2.3.3.sif
+
+max_k: 4

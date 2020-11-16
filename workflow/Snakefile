@@ -1,0 +1,292 @@
+from os.path import join
+from glob import glob
+import pandas as pd
+
+configfile: 'cfg/config.yml'
+
+#load participants.tsv file (list of HCP subject IDs),
+df = pd.read_table(config['participants_tsv'])
+subjects = df.participant_id.to_list() 
+#subjects = ['100610']
+
+seed = config['seed']
+
+#parameters for input/output
+runs = config['runs']
+vox_res = config['voxel_size']
+vtx_res = config['vertex_nr'] 
+
+wildcard_constraints:
+    subject="[0-9]+",
+    seed='PFCtx',
+    run='rfMRI_REST1_7T_PA|rfMRI_REST2_7T_AP'
+
+rule all:
+    input: 
+        #expand('results/funcparc/group/clustering/seed-{s}_{vr}_method-spectralcosine_k-{k}_cluslabels.nii.gz',s=seed, vr=vox_res, k=range(2,config['max_k']+1),allow_missing=True),
+        expand('results/funcparc/sub-{subject}/fmri/rfMRI_REST_7T_cleaned+.seed-{seed}_{vox_res}_59k_fs_LR.dtseries.nii', subject=subjects, run=runs, seed=seed, vox_res=vox_res)
+
+rule unzip_packages:
+    input: 
+        packages = expand(join(config['hcp1200_zip_dir'],'{subject}_{package}.zip'), package=config['hcp_package_dict'].values(), allow_missing=True)
+    params:
+        out_dir = 'hcp1200',
+        files_in_pkg = expand('{filename}',filename=config['hcp_package_dict'].keys())
+    output: 
+        files = expand('hcp1200/{filename}',filename=config['hcp_package_dict'].keys())
+    group: 'preprocessing'
+    run: 
+        for pkg,file in zip(input.packages, params.files_in_pkg):
+            shell('unzip -n {pkg} {file} -d {params.out_dir}')
+
+# Some work to get subject piriform label into MNI 1.6 mm space
+
+ruleorder: merge_roi > create_atlas
+
+rule resample_seed_to_anat:
+    input:
+        seed = join(config['diffparc'],'masks/seed_from-hcp7Tsubj_rpiriform.nii.gz'),
+        ref = 'hcp1200/{subject}/T1w/T1w_acpc_dc.nii.gz'
+    output: 'results/funcparc/sub-{subject}/seed/seed-{seed}_space-T1w.nii.gz'
+    group: 'preprocessing'
+    singularity: config['singularity_neuroglia']
+    shell:
+        "mri_convert {input.seed} {output} -rl {input.ref} -rt cubic -nc"
+
+rule resample_seed_to_std:
+    input:
+        seed = rules.resample_seed_to_anat.output,
+        ref = 'hcp1200/{subject}/MNINonLinear/T1w_restore.1.60.nii.gz',
+        xfm = 'hcp1200/{subject}/MNINonLinear/xfms/acpc_dc2standard.nii.gz'
+    output: 'results/funcparc/sub-{subject}/seed/seed-{seed}_space-atlas.nii.gz'
+    group: 'preprocessing'
+    singularity: config['singularity_neuroglia']
+    shell:
+        "applywarp -i {input.seed} -r {input.ref} -w {input.xfm} -o {output} --interp=spline"    
+
+def get_average_seed(input,output):
+    import numpy as np
+    import nibabel as nib
+
+    avg_seed = np.zeros(
+        nib.load(input[0]).get_fdata().shape
+        )
+
+    for in_image in input:
+
+        in_seed = nib.load(in_image)
+        avg_seed += in_seed.get_fdata()
+    avg_seed = avg_seed/len(input)
+
+    nii = nib.Nifti1Image(avg_seed, affine=in_seed.affine, header=in_seed.header)
+    nib.save(nii, output[0])
+
+rule average_seed_across_subjects:
+    input:
+        seeds = expand('results/funcparc/sub-{subject}/seed/seed-{{seed}}_space-atlas.nii.gz', subject=subjects)
+    output: 'results/funcparc/group/seed/seed-{seed}_space-atlas.nii.gz'
+    group: 'preprocessing'
+    run: get_average_seed(input.seeds, output)  
+
+rule binarize_seed:
+    input: rules.average_seed_across_subjects.output
+    output: 'results/funcparc/group/seed/seed-{seed}_space-atlas_desc-bin.nii.gz'
+    group: 'preprocessing'
+    singularity: config['singularity_neuroglia']
+    shell:
+        "fslmaths {input} -thr 0.2 -bin {output}"     
+
+# Rule here to make custom subcort atlas, we give our 'seed' label 16 (brainstem) to make it work with workbench
+rule merge_roi:
+    input:
+        atlas = config['subcort_atlas'],
+        roi = rules.binarize_seed.output
+    output: 'results/funcparc/group/atlas/seed-{seed}_BigBrain{vox_res}.nii.gz'
+    group: 'atlas'
+    run:    
+        import numpy as np
+        import nibabel as nib
+
+        atlas_in = nib.load(input.atlas)
+        roi_in = nib.load(input.roi[0])
+        roi = roi_in.get_fdata()
+
+        atlas_new = atlas_in.get_fdata()
+        atlas_new[atlas_new==16] = 0
+        atlas_new[roi==1] = 16
+
+        img = nib.Nifti1Image(atlas_new, affine=atlas_in.affine, header=atlas_in.header)
+        nib.save(img,output[0])
+
+rule create_atlas:
+    input:
+        atlas = rules.merge_roi.output,
+        labels = config['subcort_labels'],
+        lh = config['lh_mmp'],
+        rh = config['rh_mmp']
+    output:
+        nifti = 'results/funcparc/group/atlas/seed-{seed}_HCP-MMP_BigBrain{vox_res}.nii.gz',
+        cifti = 'results/funcparc/group/atlas/seed-{seed}_HCP-MMP_BigBrain{vox_res}.dlabel.nii'
+    group: 'atlas'
+    singularity: config['singularity_connectomewb']
+    shell:
+        'wb_command -volume-label-import {input.atlas} {input.labels} {output.nifti} &&'
+        'wb_command -cifti-create-label {output.cifti} -volume {output.nifti} {output.nifti} -left-label {input.lh} -right-label {input.rh}'
+
+# Prepare subcortical rs-fMRI data as done by HCP
+rule prepare_subcort:
+    input:
+        vol = 'hcp1200/{subject}/MNINonLinear/Results/{run}/{run}.nii.gz',
+        rois = rules.create_atlas.output.nifti
+    output: 'results/funcparc/sub-{subject}/fmri/{run}_AtlasSubcortical{vox_res}_seed-{seed}.nii.gz'
+    params:
+        sigma = config['sigma'],
+        temp = 'results/funcparc/sub-{subject}/tmp'
+    group: 'preprocessing'
+    singularity: config['singularity_connectomewb']
+    log: 'logs/sub-{subject}/prepare_subcort_{run}_{vox_res}_seed-{seed}.log'
+    threads: 8
+    resources:
+        mem_mb = 32000
+    shell: 'scripts/prep_subcortical.sh {input.vol} {input.rois} {params.temp} {params.sigma} {output} &> {log}'
+
+# Extract cortical timeseries data
+rule cifti_separate:
+    input: 
+        dtseries = 'hcp1200/{subject}/MNINonLinear/Results/{run}/{run}_Atlas_1.6mm.dtseries.nii',
+    output: 
+        lh = 'results/funcparc/sub-{subject}/fmri/{run}.L.59k_fs_LR.func.gii',
+        rh = 'results/funcparc/sub-{subject}/fmri/{run}.R.59k_fs_LR.func.gii'
+    group: 'preprocessing'
+    singularity: config['singularity_connectomewb']
+    threads: 8
+    resources:
+        mem_mb = 32000
+    shell:
+        'wb_command -cifti-separate {input} COLUMN -metric CORTEX_LEFT {output.lh} -metric CORTEX_RIGHT {output.rh}'
+
+# Create CIFTI timeseries data
+rule create_dtseries:
+    input: 
+        vol = rules.prepare_subcort.output,
+        rois = rules.create_atlas.output.nifti,
+        lh = rules.cifti_separate.output.lh,
+        rh = rules.cifti_separate.output.rh
+    output: 'results/funcparc/sub-{subject}/fmri/{run}_seed-{seed}_{vox_res}.59k_fs_LR.dtseries.nii'
+    group: 'preprocessing'
+    singularity: config['singularity_connectomewb']
+    threads: 8
+    resources:
+        mem_mb = 32000
+    shell:
+        'wb_command -cifti-create-dense-timeseries {output} -volume {input.vol} {input.rois} -left-metric {input.lh} -right-metric {input.rh}'
+
+# Extract confounds for cleaning rs-fMRI data
+rule extract_confounds:
+    input:
+        vol = rules.prepare_subcort.input.vol,
+        rois = 'hcp1200/{subject}/MNINonLinear/ROIs/Atlas_wmparc.1.60.nii.gz',
+        movreg = 'hcp1200/{subject}/MNINonLinear/Results/{run}/Movement_Regressors_dt.txt'
+    output: 'results/funcparc/sub-{subject}/fmri/{run}_seed-{seed}_{vox_res}_confounds.tsv'
+    group: 'preprocessing'
+    log: 'logs/sub-{subject}/extract_confounds_{run}_{vox_res}_seed-{seed}.log'
+    resources:
+        mem_mb = 32000
+    script: 'scripts/extract_confounds.py'
+
+# Clean rs-fMRI data
+rule clean_dtseries:
+    input:
+        dtseries = rules.create_dtseries.output,
+        confounds = rules.extract_confounds.output
+    output: 'results/funcparc/sub-{subject}/fmri/{run}_cleaned.seed-{seed}_{vox_res}_59k_fs_LR.dtseries.nii' 
+    params: 
+        cleaning = 'resources/ciftify_cleaning.json'
+    group: 'preprocessing'
+    singularity: config['singularity_ciftify']
+    log: 'logs/sub-{subject}/clean_dtseries_{run}_{vox_res}_seed-{seed}.log'
+    threads: 8
+    resources:
+        mem_mb = 32000
+    shell:
+        'ciftify_clean_img --output-file={output} --confounds-tsv={input.confounds} --clean-config={params.cleaning} --verbose {input.dtseries} &> {log}'
+
+rule concatenate_runs:
+    input: expand('results/funcparc/sub-{{subject}}/fmri/{r}_cleaned.seed-{{seed}}_{{vox_res}}_59k_fs_LR.dtseries.nii', r=runs)
+    output: 'results/funcparc/sub-{subject}/fmri/rfMRI_REST_7T_cleaned.seed-{seed}_{vox_res}_59k_fs_LR.dtseries.nii' 
+    group: 'preprocessing'
+    singularity: config['singularity_connectomewb']
+    threads: 8
+    resources:
+        mem_mb = 32000
+    shell:
+        "wb_command -cifti-merge {output} -cifti `echo '{input}' | sed 's/ / -cifti /g'`"
+
+# As used in https://rdcu.be/b7N8K, requires matlab. Does detrending and demeaning too
+rule wishart_filter:
+    input: rules.concatenate_runs.output
+    output: 'results/funcparc/sub-{subject}/fmri/rfMRI_REST_7T_cleaned+.seed-{seed}_{vox_res}_59k_fs_LR.dtseries.nii'  #'results/funcparc/sub-{subject}/fmri/{run}_cleaned+.seed-{seed}_{vox_res}_59k_fs_LR.dtseries.nii' 
+    params:
+        script = 'scripts/wishart_filter.m'
+    group: 'preprocessing'
+    threads: 8
+    resources:
+        mem_mb = 32000
+    shell:
+        "bash scripts/wishart_filter.sh {params.script} {input} {output}"
+
+rule parcellate_tseries:
+    input:
+        dtseries = rules.wishart_filter.output,
+        rois = rules.create_atlas.output.cifti
+    output: 'results/funcparc/sub-{subject}/fmri/rfMRI_REST_7T_cleaned+.seed-{seed}_{vox_res}_59k_fs_LR.ptseries.nii' 
+    group: 'preprocessing'
+    singularity: config['singularity_connectomewb']
+    threads: 8
+    resources:
+        mem_mb = 32000
+    shell:
+        'wb_command -cifti-parcellate {input.dtseries} {input.rois} COLUMN {output}'
+
+rule compute_correlation:
+    input:
+        ptseries = 'results/funcparc/sub-{subject}/fmri/rfMRI_REST_7T_cleaned+.seed-{seed}_{vox_res}_59k_fs_LR.ptseries.nii',
+        vol = 'results/funcparc/sub-{subject}/fmri/rfMRI_REST_7T_cleaned+.seed-{seed}_{vox_res}_59k_fs_LR.dtseries.nii'
+        # ptseries = expand(
+        #     'results/funcparc/sub-{{subject}}/fmri/{r}_cleaned+.seed-{{seed}}_{{vox_res}}_59k_fs_LR.ptseries.nii', r=runs),
+        # vol = expand(
+        #     'results/funcparc/sub-{{subject}}/fmri/{r}_cleaned+.seed-{{seed}}_{{vox_res}}_59k_fs_LR.dtseries.nii', r=runs)
+    params:
+        seed = config['seed']
+    output: 'results/funcparc/sub-{subject}/clustering/correlation_matrix_seed-{seed}_{vox_res}.npz'
+    group: 'preprocessing'
+    script: 'scripts/compute_correlation.py'
+
+rule combine_correlation:
+    input: expand('results/funcparc/sub-{subject}/clustering/correlation_matrix_seed-{{seed}}_{{vox_res}}.npz',subject=subjects)
+    output: 'results/funcparc/group/clustering/correlation_matrix_seed-{seed}_{vox_res}.npz'
+    group: 'clustering'
+    run:
+        import numpy as np
+
+        data = np.load(input[0])
+        nsubjects = len(input)
+        combined = np.zeros([nsubjects,data['corr'].shape[0],data['corr'].shape[1]])
+
+        for i,npz in enumerate(input):
+            data = np.load(npz)
+            combined[i,:,:] = data['corr']
+
+        np.savez(output[0], corr_group=combined,indices=data['indices'])
+
+rule spectral_clustering:
+    input:
+        correlation = rules.combine_correlation.output,
+        rois = rules.create_atlas.output.nifti
+    output:
+        niftis = expand('results/funcparc/group/clustering/seed-{{seed}}_{{vox_res}}_method-spectralcosine_k-{k}_cluslabels.nii.gz', k=range(2,config['max_k']+1)),
+        labels = 'results/funcparc/group/clustering/clusterlabels_seed-{seed}_{vox_res}.csv'
+    params:
+        max_k = config['max_k']
+    group: 'clustering'
+    script: 'scripts/spectral_clustering.py'
